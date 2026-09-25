@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"time"
 
 	"github.com/blueship581/print-color-calibration-release/backend/internal/dto"
 	"github.com/blueship581/print-color-calibration-release/backend/internal/model"
@@ -16,6 +17,8 @@ type ColorProofRepository interface {
 	Update(context.Context, uint, uint, *model.ColorProof) error
 	Delete(context.Context, uint) error
 	CountByStatus(context.Context) (map[string]int64, error)
+	ListByRelatedCode(context.Context, string) ([]model.ColorProof, error)
+	CountAcceptedRelatedSince(context.Context, string, time.Time) (int64, error)
 }
 
 type colorProofRepository struct {
@@ -43,4 +46,25 @@ func (r *colorProofRepository) Delete(ctx context.Context, id uint) error {
 }
 func (r *colorProofRepository) CountByStatus(ctx context.Context) (map[string]int64, error) {
 	return r.store.CountByStatus(ctx)
+}
+
+// ListByRelatedCode returns every 校样 linked to a batch code, newest first,
+// so the rework detail can show exactly which proofs were invalidated.
+func (r *colorProofRepository) ListByRelatedCode(ctx context.Context, relatedCode string) ([]model.ColorProof, error) {
+	items := make([]model.ColorProof, 0)
+	err := r.store.db.WithContext(ctx).
+		Where("related_code = ?", relatedCode).
+		Order("updated_at DESC, id DESC").
+		Find(&items).Error
+	return items, err
+}
+
+// CountAcceptedRelatedSince counts reviewer-accepted 校样 captured for the
+// batch after a rework started; it is the gate for releasing the batch again.
+func (r *colorProofRepository) CountAcceptedRelatedSince(ctx context.Context, relatedCode string, since time.Time) (int64, error) {
+	var total int64
+	err := r.store.db.WithContext(ctx).Model(&model.ColorProof{}).
+		Where("related_code = ? AND status = ? AND created_at >= ?", relatedCode, "accepted", since).
+		Count(&total).Error
+	return total, err
 }

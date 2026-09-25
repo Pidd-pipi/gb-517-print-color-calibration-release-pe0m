@@ -25,6 +25,10 @@ const (
 
 var AllDecisionType = []string{"release", "rework", "quarantine"}
 
+// ProofStateInvalid marks 校样 that belonged to a batch pulled back for
+// rework. It is terminal: fresh proofs must be captured for the batch.
+const ProofStateInvalid = "invalid"
+
 var PressUnitTransitions = map[string]map[string]bool{
 	"ready":       {"setup": true, "printing": true},
 	"setup":       {"printing": true, "maintenance": true, "ready": true},
@@ -45,6 +49,7 @@ var ColorProofTransitions = map[string]map[string]bool{
 	"review":   {"accepted": true, "rejected": true, "captured": true},
 	"accepted": {"review": true},
 	"rejected": {"review": true},
+	"invalid":  {},
 }
 
 var ReleaseDecisionTransitions = map[string]map[string]bool{

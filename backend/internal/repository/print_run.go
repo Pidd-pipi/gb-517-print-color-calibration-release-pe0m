@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 
+	"github.com/blueship581/print-color-calibration-release/backend/internal/constants"
 	"github.com/blueship581/print-color-calibration-release/backend/internal/dto"
 	"github.com/blueship581/print-color-calibration-release/backend/internal/model"
 	"gorm.io/gorm"
@@ -14,6 +15,7 @@ type PrintRunRepository interface {
 	Get(context.Context, uint) (model.PrintRun, error)
 	CreateVersioned(context.Context, *model.PrintRun, string, string, string) error
 	UpdateVersioned(context.Context, uint, uint, *model.PrintRun, string, string, string) error
+	ApplyRework(context.Context, uint, uint, *model.PrintRun, string, string, string) (int64, error)
 	Delete(context.Context, uint) error
 	CountByStatus(context.Context) (map[string]int64, error)
 }
@@ -64,8 +66,39 @@ func printRunRevision(item *model.PrintRun, actor, requestID, reason string) *mo
 		Facility: item.Facility, Owner: item.Owner, Category: item.Category,
 		RiskLevel: item.RiskLevel, MetricValue: item.MetricValue, MetricUnit: item.MetricUnit,
 		Evidence: item.Evidence, RelatedCode: item.RelatedCode,
+		ReworkStartedAt: item.ReworkStartedAt, ReworkCount: item.ReworkCount,
 		Actor: actor, RequestID: requestID, Reason: reason,
 	}
+}
+
+// ApplyRework moves a released batch into hold inside one transaction: the
+// optimistic-lock update, the immutable revision and the invalidation of
+// every 校样 previously linked to the batch either all succeed or nothing is
+// persisted, so a conflict never corrupts the version chain.
+func (r *printRunRepository) ApplyRework(ctx context.Context, id, version uint, item *model.PrintRun, actor, requestID, reason string) (int64, error) {
+	var invalidated int64
+	err := r.store.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&model.PrintRun{}).Where("id = ? AND version = ?", id, version).
+			Select("*").Omit("id", "code", "created_at", "deleted_at", "Revisions").Updates(item)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrVersionConflict
+		}
+		if err := tx.Create(printRunRevision(item, actor, requestID, reason)).Error; err != nil {
+			return err
+		}
+		proofs := tx.Model(&model.ColorProof{}).
+			Where("related_code = ? AND status <> ?", item.Code, constants.ProofStateInvalid).
+			Updates(map[string]any{"status": constants.ProofStateInvalid, "updated_at": item.UpdatedAt})
+		if proofs.Error != nil {
+			return proofs.Error
+		}
+		invalidated = proofs.RowsAffected
+		return nil
+	})
+	return invalidated, err
 }
 func (r *printRunRepository) Delete(ctx context.Context, id uint) error {
 	return r.store.Delete(ctx, id)

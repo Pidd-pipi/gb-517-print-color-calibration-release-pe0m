@@ -15,9 +15,24 @@ export interface DomainRecord {
   effectiveAt: string;
   evidence: string;
   relatedCode: string;
+  reworkStartedAt?: string | null;
+  reworkCount?: number;
   createdAt: string;
   updatedAt: string;
   revisions?: RevisionRecord[];
+}
+
+export interface ReworkCondition { label: string; met: boolean }
+export interface ReworkProof {
+  id: number; code: string; name: string; status: string;
+  metricValue: number; metricUnit: string; evidence: string; updatedAt: string;
+}
+export interface ReworkInfo {
+  runId: number; runCode: string; status: string;
+  reworkStartedAt: string | null; reworkCount: number;
+  invalidatedProofs: ReworkProof[];
+  reReleaseReady: boolean;
+  reReleaseConditions: ReworkCondition[];
 }
 
 export interface RevisionRecord {
