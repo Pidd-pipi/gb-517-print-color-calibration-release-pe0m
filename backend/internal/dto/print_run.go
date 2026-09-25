@@ -33,3 +33,19 @@ type UpdatePrintRun struct {
 	Evidence        string    `json:"evidence" binding:"max=2000"`
 	RelatedCode     string    `json:"relatedCode" binding:"max=64"`
 }
+
+// StartReworkRequest is the reviewer-only contract for 批次返修. Reason is not
+// binding-required: the service maps a missing/blank reason to 409
+// rework_conflict ("原因缺失返回冲突") instead of a generic 400.
+type StartReworkRequest struct {
+	ExpectedVersion uint   `json:"expectedVersion" binding:"required"`
+	Reason          string `json:"reason" binding:"max=500"`
+}
+
+// ReworkListQuery pages the 批次返修 history.
+type ReworkListQuery struct {
+	Page     int    `form:"page"`
+	PageSize int    `form:"pageSize"`
+	Status   string `form:"status"`
+	RunCode  string `form:"runCode"`
+}

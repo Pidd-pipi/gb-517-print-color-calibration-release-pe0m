@@ -15,14 +15,39 @@ export interface DomainRecord {
   effectiveAt: string;
   evidence: string;
   relatedCode: string;
+  runCode?: string;
+  reworkId?: number;
   createdAt: string;
   updatedAt: string;
   revisions?: RevisionRecord[];
+  reworks?: ReworkRecord[];
 }
 
 export interface RevisionRecord {
   id: number; version: number; status: string; name: string; metricValue: number;
   metricUnit: string; evidence: string; actor: string; requestId: string; reason: string; createdAt: string;
+}
+
+export interface ReworkRecord {
+  id: number;
+  code: string;
+  name: string;
+  status: 'waiting' | 'released';
+  version: number;
+  printRunId: number;
+  runCode: string;
+  reworkCount: number;
+  reason: string;
+  startedAt: string;
+  completedAt: string | null;
+  resolutionProofCode: string;
+  invalidatedProofs?: DomainRecord[];
+}
+
+export interface ReworkDetail extends ReworkRecord {
+  releaseReady: boolean;
+  releaseCondition: string;
+  acceptedProof?: DomainRecord;
 }
 
 export interface PageMeta { page: number; pageSize: number; total: number }

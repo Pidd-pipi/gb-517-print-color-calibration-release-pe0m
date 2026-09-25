@@ -17,6 +17,7 @@ type PrintRun struct {
 	Evidence    string             `json:"evidence" gorm:"size:2000"`
 	RelatedCode string             `json:"relatedCode" gorm:"size:64;index"`
 	Revisions   []PrintRunRevision `json:"revisions,omitempty" gorm:"foreignKey:PrintRunID"`
+	Reworks     []RunRework        `json:"reworks,omitempty" gorm:"foreignKey:PrintRunID"`
 }
 
 func (item *PrintRun) GetBase() *BaseModel { return &item.BaseModel }
@@ -47,3 +48,34 @@ type PrintRunRevision struct {
 	Reason      string    `json:"reason" gorm:"size:500;not null"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
+
+// RunRework models 批次返修 initiated after a batch was already released. It
+// replaces verbal-only colour-difference notifications: every post-release
+// remediation carries a mandatory reason, waits for a replacement proof and is
+// preserved forever as part of the batch history. Lifecycle: waiting ->
+// released. Version provides optimistic locking against double-start/close.
+type RunRework struct {
+	BaseModel
+	// PrintRunID / RunCode identify the released 印刷批次 being remediated.
+	PrintRunID uint   `json:"printRunId" gorm:"not null;index"`
+	RunCode    string `json:"runCode" gorm:"size:64;not null;index"`
+	// ReworkCount is the 1-based cumulative rework sequence for the batch, so
+	// "累计返修次数" survives across multiple release/rework cycles.
+	ReworkCount uint `json:"reworkCount" gorm:"not null"`
+	// Reason is the mandatory colour-difference explanation supplied by the
+	// reviewer who initiates the rework.
+	Reason string `json:"reason" gorm:"size:500;not null"`
+	// StartedAt records 返修开始时间; CompletedAt is set when re-release lands.
+	StartedAt   time.Time  `json:"startedAt" gorm:"not null"`
+	CompletedAt *time.Time `json:"completedAt"`
+	// ResolutionProofCode is the replacement proof that passed review and
+	// unlocked re-release.
+	ResolutionProofCode string `json:"resolutionProofCode" gorm:"size:64"`
+	// InvalidatedProofs snapshots the proofs declared void when this rework
+	// started; the underlying ColorProof rows move to invalidated.
+	InvalidatedProofs []ColorProof `json:"invalidatedProofs,omitempty" gorm:"foreignKey:ReworkID"`
+}
+
+func (item RunRework) TableName() string { return "run_reworks" }
+
+var RunReworkInitialStatus = "waiting"

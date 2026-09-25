@@ -81,6 +81,7 @@ func migrate(db *gorm.DB) error {
 		&model.PrintRun{}, &model.PrintRunRevision{},
 		&model.ColorProof{},
 		&model.ReleaseDecision{}, &model.ReleaseDecisionRevision{},
+		&model.RunRework{},
 	)
 }
 
@@ -172,6 +173,11 @@ func seedPrintRun(ctx context.Context, db *gorm.DB) error {
 			Description: "用于启动验证和主要流程演示的印刷批次记录"}, Facility: "印刷色彩批次校准放行区域3", Owner: "安全主管组",
 			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
 			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-03"},
+
+		{BaseModel: model.BaseModel{Code: "PR-004", Name: "印刷批次示例四", Status: "released", Version: 1,
+			Description: "已放行示例批次，可演示放行后色差批次返修"}, Facility: "印刷色彩批次校准放行区域4", Owner: "质量复核组",
+			Category: "复核", RiskLevel: "medium", MetricValue: 1.6, MetricUnit: "ΔE",
+			EffectiveAt: now.Add(9 * time.Hour), Evidence: "放行校样 CP-004 已归档", RelatedCode: "REL-517-04"},
 	}
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Omit("Revisions").Create(&items).Error; err != nil {
@@ -213,6 +219,12 @@ func seedColorProof(ctx context.Context, db *gorm.DB) error {
 			Description: "用于启动验证和主要流程演示的色彩校样记录"}, Facility: "印刷色彩批次校准放行区域3", Owner: "安全主管组",
 			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
 			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-517-03"},
+
+		{BaseModel: model.BaseModel{Code: "CP-004", Name: "色彩校样示例四", Status: "accepted", Version: 1,
+			Description: "已放行批次 PR-004 的放行校样，发起批次返修后将失效"}, Facility: "印刷色彩批次校准放行区域4", Owner: "质量复核组",
+			Category: "复核", RiskLevel: "medium", MetricValue: 1.6, MetricUnit: "ΔE",
+			EffectiveAt: now.Add(9 * time.Hour), Evidence: "放行前最终分光采样", RelatedCode: "REL-517-04",
+			RunCode: "PR-004"},
 	}
 	return db.WithContext(ctx).Create(&items).Error
 }

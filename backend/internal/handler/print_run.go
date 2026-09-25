@@ -110,3 +110,70 @@ func (h *PrintRunHandler) remove(c *gin.Context) {
 	}
 	util.NoContent(c)
 }
+
+// RunReworkHandler exposes 批次返修: reviewer-only start on a released batch,
+// plus read endpoints for the waiting history and detail (start time,
+// invalidated proofs, re-release condition).
+type RunReworkHandler struct{ service service.RunReworkService }
+
+func NewRunReworkHandler(s service.RunReworkService) *RunReworkHandler {
+	return &RunReworkHandler{service: s}
+}
+
+func (h *RunReworkHandler) Register(group *gin.RouterGroup) {
+	// Start endpoint lives under the batch aggregate.
+	group.POST("/runs/:id/rework", middleware.RequireMinimumRole("reviewer"), h.startForRun)
+
+	resource := group.Group("/reworks")
+	resource.GET("", h.list)
+	resource.GET("/:id", h.get)
+}
+
+func (h *RunReworkHandler) startForRun(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var input dto.StartReworkRequest
+	if err := c.ShouldBindJSON(&input); err != nil {
+		util.Fail(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	rework, err := h.service.Start(c.Request.Context(), id, input,
+		actorFromContext(c), roleFromContext(c), requestIDFromContext(c))
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	util.Created(c, rework)
+}
+
+func (h *RunReworkHandler) list(c *gin.Context) {
+	var query dto.ReworkListQuery
+	_ = c.ShouldBindQuery(&query)
+	if query.Page < 1 {
+		query.Page = 1
+	}
+	if query.PageSize < 1 || query.PageSize > 100 {
+		query.PageSize = 20
+	}
+	result, err := h.service.List(c.Request.Context(), query)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	util.Page(c, result.Items, result.Page, result.PageSize, result.Total)
+}
+
+func (h *RunReworkHandler) get(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	detail, err := h.service.Get(c.Request.Context(), id)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	util.OK(c, detail)
+}

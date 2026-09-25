@@ -17,6 +17,7 @@ type CreateColorProof struct {
 	EffectiveAt time.Time `json:"effectiveAt" binding:"required"`
 	Evidence    string    `json:"evidence" binding:"max=2000"`
 	RelatedCode string    `json:"relatedCode" binding:"max=64"`
+	RunCode     string    `json:"runCode" binding:"max=64"`
 }
 
 type UpdateColorProof struct {
@@ -32,4 +33,5 @@ type UpdateColorProof struct {
 	EffectiveAt     time.Time `json:"effectiveAt" binding:"required"`
 	Evidence        string    `json:"evidence" binding:"max=2000"`
 	RelatedCode     string    `json:"relatedCode" binding:"max=64"`
+	RunCode         string    `json:"runCode" binding:"max=64"`
 }

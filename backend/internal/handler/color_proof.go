@@ -28,7 +28,7 @@ func (h *ColorProofHandler) Register(group *gin.RouterGroup) {
 
 func (h *ColorProofHandler) list(c *gin.Context) {
 	query := bindPage(c)
-	result, err := h.service.List(c.Request.Context(), query)
+	result, err := h.service.List(c.Request.Context(), query, c.Query("runCode"))
 	if err != nil {
 		handleError(c, err)
 		return

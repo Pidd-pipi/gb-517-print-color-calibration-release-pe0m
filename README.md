@@ -36,9 +36,20 @@ docker compose down -v --remove-orphans
 | 业务模块 | 后端实体 | API 前缀 | 状态流 |
 |---|---|---|---|
 | 印刷设备 | `PressUnit` | `/api/presses` | ready, setup, printing, maintenance |
-| 印刷批次 | `PrintRun` | `/api/runs` | setup, printing, proofing, hold, released |
-| 色彩校样 | `ColorProof` | `/api/proofs` | captured, review, accepted, rejected |
+| 印刷批次 | `PrintRun` | `/api/runs` | setup, printing, proofing, hold, released, rework_pending |
+| 色彩校样 | `ColorProof` | `/api/proofs` | captured, review, accepted, rejected, invalidated |
 | 放行决定 | `ReleaseDecision` | `/api/release` | draft, release, rework, quarantine |
+| 批次返修 | `RunRework` | `/api/reworks`、`POST /api/runs/:id/rework` | waiting, released |
+
+### 放行后批次返修
+
+放行后才发现色差时，由**质量复核员**对已放行批次填写原因并发起返修：
+
+1. `POST /api/runs/:id/rework`（`expectedVersion` + 必填 `reason`）将批次 `released -> rework_pending`（返修等待），记录返修开始时间与该批次累计返修次数，并在同一事务内追加不可变版本。
+2. 该批次此前校样（按 `runCode`/`relatedCode` 关联）全部置为终态 `invalidated` 并冻结，不能再流转或编辑；原放行决定与完整版本链保留。
+3. 现场为**同一批次**补做校样（`runCode` 与批次一致），走完 captured → review 并由复核员接收后，批次才能经 `POST /api/runs/:id/transition`（`rework_pending -> released`）再次放行；返修单记录放行依据校样与完成时间。
+4. 原因缺失、批次状态不符（仅 `released` 可返修，等待中不可重复发起）或乐观版本变化时统一返回 `409 rework_conflict` / `version_conflict`；未通过复核的补做校样不能放行。
+5. `GET /api/reworks/:id` 详情返回开始时间、失效校样列表、再次放行条件说明与当前是否满足条件。
 
 - JWT 登录和 viewer/operator/reviewer/admin 四级 RBAC。
 - 所有状态变化使用乐观锁并写入不可覆盖的审计日志。
@@ -121,7 +132,8 @@ cd .. && docker compose config --quiet
 
 | 枚举 | 值 | 前后端出现位置 |
 |---|---|---|
-| `RunState` | `setup, printing, proofing, hold, released` | `backend/internal/constants/status.go`、`frontend/src/types/status.ts` |
+| `RunState` | `setup, printing, proofing, hold, released, rework_pending` | `backend/internal/constants/status.go`、`frontend/src/types/status.ts` |
+| `ProofState` | `captured, review, accepted, rejected, invalidated` | `backend/internal/constants/status.go`、`frontend/src/types/status.ts` |
 | `DecisionType` | `release, rework, quarantine` | `backend/internal/constants/status.go`、`frontend/src/types/status.ts` |
 
 每个实体自己的完整迁移图同样位于 `backend/internal/constants/status.go`；页面使用的状态列表位于 `frontend/src/types/status.ts`。修改状态时必须同步两处并更新对应服务测试。

@@ -25,10 +25,11 @@ type PrintRunService interface {
 type printRunService struct {
 	repository repository.PrintRunRepository
 	security   SecurityService
+	rework     RunReworkService
 }
 
-func NewPrintRunService(repo repository.PrintRunRepository, security SecurityService) PrintRunService {
-	return &printRunService{repository: repo, security: security}
+func NewPrintRunService(repo repository.PrintRunRepository, security SecurityService, rework RunReworkService) PrintRunService {
+	return &printRunService{repository: repo, security: security, rework: rework}
 }
 
 func (s *printRunService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.PrintRun], error) {
@@ -95,7 +96,19 @@ func (s *printRunService) Transition(ctx context.Context, id uint, input dto.Tra
 		return model.PrintRun{}, err
 	}
 	target := strings.TrimSpace(input.Status)
-	if (target == string(constants.RunStateReleased) || current.Status == string(constants.RunStateReleased)) && !canReview(role) {
+	if target == string(constants.RunStateReleased) && !canReview(role) {
+		return model.PrintRun{}, ErrForbidden
+	}
+	// A batch waiting in 批次返修 can only return to released through the gated
+	// re-release: a replacement proof for the same batch must have passed
+	// review since the rework started.
+	if current.Status == string(constants.RunStateReworkPending) && target == string(constants.RunStateReleased) {
+		if err := s.rework.CloseForRelease(ctx, id, input.ExpectedVersion, actor, requestID, strings.TrimSpace(input.Reason)); err != nil {
+			return model.PrintRun{}, err
+		}
+		return s.repository.Get(ctx, id)
+	}
+	if current.Status == string(constants.RunStateReleased) && !canReview(role) {
 		return model.PrintRun{}, ErrForbidden
 	}
 	if !constants.CanTransition(constants.PrintRunTransitions, current.Status, target) {
@@ -139,4 +152,155 @@ func validatePrintRunBusinessFields(code, name, facility, owner string) error {
 		return ErrInvalidInput
 	}
 	return nil
+}
+
+// ReworkDetail is the read model for 批次返修详情: start time, the proofs that
+// became void and the exact condition under which re-release is allowed.
+type ReworkDetail struct {
+	model.RunRework
+	// ReleaseReady is true only when a replacement proof captured after the
+	// rework started has passed reviewer acceptance (or the rework completed).
+	ReleaseReady bool `json:"releaseReady"`
+	// ReleaseCondition explains 再次放行条件 in human-readable form.
+	ReleaseCondition string `json:"releaseCondition"`
+	// AcceptedProof is the qualifying replacement proof, when present.
+	AcceptedProof *model.ColorProof `json:"acceptedProof,omitempty"`
+}
+
+type RunReworkService interface {
+	List(context.Context, dto.ReworkListQuery) (repository.Page[model.RunRework], error)
+	Get(context.Context, uint) (ReworkDetail, error)
+	OpenForRun(context.Context, uint) (model.RunRework, bool, error)
+	Start(context.Context, uint, dto.StartReworkRequest, string, string, string) (model.RunRework, error)
+	// CloseForRelease performs the gated re-release of a waiting 批次返修.
+	CloseForRelease(ctx context.Context, runID, expectedVersion uint, actor, requestID, reason string) error
+}
+
+type runReworkService struct {
+	reworks  repository.RunReworkRepository
+	runs     repository.PrintRunRepository
+	proofs   ColorProofService
+	security SecurityService
+}
+
+func NewRunReworkService(reworks repository.RunReworkRepository, runs repository.PrintRunRepository, proofs ColorProofService, security SecurityService) RunReworkService {
+	return &runReworkService{reworks: reworks, runs: runs, proofs: proofs, security: security}
+}
+
+func (s *runReworkService) List(ctx context.Context, query dto.ReworkListQuery) (repository.Page[model.RunRework], error) {
+	return s.reworks.List(ctx, query)
+}
+
+func (s *runReworkService) detailFrom(ctx context.Context, rework model.RunRework) ReworkDetail {
+	detail := ReworkDetail{RunRework: rework,
+		ReleaseCondition: "为同一批次补做校样并通过质量复核后，批次才可再次放行"}
+	if rework.Status == "released" && rework.ResolutionProofCode != "" {
+		// Loaded by code so the detail stays correct even after a later rework
+		// cycle invalidates the proof that originally closed this one.
+		if proof, ok, err := s.proofs.GetByCode(ctx, rework.ResolutionProofCode); err == nil && ok {
+			proofCopy := proof
+			detail.AcceptedProof = &proofCopy
+		}
+		detail.ReleaseReady = true
+		return detail
+	}
+	if proof, ok, err := s.proofs.LatestAcceptedForRun(ctx, rework.RunCode, rework.StartedAt); err == nil && ok {
+		proofCopy := proof
+		detail.AcceptedProof = &proofCopy
+		detail.ReleaseReady = true
+	}
+	return detail
+}
+
+func (s *runReworkService) Get(ctx context.Context, id uint) (ReworkDetail, error) {
+	rework, err := s.reworks.Get(ctx, id)
+	if err != nil {
+		return ReworkDetail{}, err
+	}
+	return s.detailFrom(ctx, rework), nil
+}
+
+func (s *runReworkService) OpenForRun(ctx context.Context, runID uint) (model.RunRework, bool, error) {
+	return s.reworks.OpenForRun(ctx, runID)
+}
+
+func (s *runReworkService) Start(ctx context.Context, runID uint, input dto.StartReworkRequest, actor, role, requestID string) (model.RunRework, error) {
+	if !canReview(role) {
+		return model.RunRework{}, ErrForbidden
+	}
+	// 原因缺失 -> 冲突（与状态不符、版本变化一致地返回 409，而不是 400）。
+	if strings.TrimSpace(input.Reason) == "" {
+		return model.RunRework{}, fmt.Errorf("%w: rework reason is required", ErrReworkConflict)
+	}
+	if len(strings.TrimSpace(input.Reason)) < 3 {
+		return model.RunRework{}, fmt.Errorf("%w: rework reason is too short", ErrReworkConflict)
+	}
+	run, err := s.runs.Get(ctx, runID)
+	if err != nil {
+		return model.RunRework{}, err
+	}
+	// 状态不符 -> 冲突：只有已放行批次可以补返修，且不能重复发起。
+	if run.Status != string(constants.RunStateReleased) {
+		return model.RunRework{}, fmt.Errorf("%w: run is %s, only released runs can enter rework", ErrReworkConflict, run.Status)
+	}
+	if open, exists, err := s.reworks.OpenForRun(ctx, runID); err != nil {
+		return model.RunRework{}, err
+	} else if exists {
+		return model.RunRework{}, fmt.Errorf("%w: waiting rework %s already exists", ErrReworkConflict, open.Code)
+	}
+	now := time.Now().UTC()
+	rework, err := s.reworks.Start(ctx, &run, input.ExpectedVersion, strings.TrimSpace(input.Reason), actor, requestID, now)
+	if err != nil {
+		return model.RunRework{}, fmt.Errorf("start 批次返修: %w", err)
+	}
+	if err := s.security.Audit(ctx, actor, requestID, "rework_start", "PrintRun", runID,
+		string(constants.RunStateReleased), string(constants.RunStateReworkPending),
+		"批次返修 #"+fmt.Sprint(rework.ReworkCount)+": "+strings.TrimSpace(input.Reason)); err != nil {
+		return model.RunRework{}, err
+	}
+	if err := s.security.Audit(ctx, actor, requestID, "rework_start", "RunRework", rework.ID,
+		"", "waiting", "started post-release rework"); err != nil {
+		return model.RunRework{}, err
+	}
+	return rework, nil
+}
+
+func (s *runReworkService) CloseForRelease(ctx context.Context, runID, expectedVersion uint, actor, requestID, reason string) error {
+	run, err := s.runs.Get(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run.Status != string(constants.RunStateReworkPending) {
+		return fmt.Errorf("%w: run is %s, expected rework_pending", ErrReworkConflict, run.Status)
+	}
+	rework, exists, err := s.reworks.OpenForRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("%w: no waiting rework exists for run %s", ErrReworkConflict, run.Code)
+	}
+	// 再次放行条件：同一批次、返修开始后补做并通过复核的校样。
+	proof, hasProof, err := s.proofs.LatestAcceptedForRun(ctx, run.Code, rework.StartedAt)
+	if err != nil {
+		return err
+	}
+	if !hasProof {
+		return fmt.Errorf("%w: replacement proof for %s must be captured and accepted before re-release", ErrReworkConflict, run.Code)
+	}
+	now := time.Now().UTC()
+	closeReason := reason
+	if strings.TrimSpace(closeReason) == "" {
+		closeReason = "released after replacement proof " + proof.Code + " accepted"
+	}
+	if err := s.reworks.Complete(ctx, &run, expectedVersion, &rework, proof.Code, actor, requestID, closeReason, now); err != nil {
+		return fmt.Errorf("re-release 印刷批次: %w", err)
+	}
+	if err := s.security.Audit(ctx, actor, requestID, "rework_release", "PrintRun", runID,
+		string(constants.RunStateReworkPending), string(constants.RunStateReleased),
+		"返修批次再次放行，依据补做校样 "+proof.Code); err != nil {
+		return err
+	}
+	return s.security.Audit(ctx, actor, requestID, "rework_release", "RunRework", rework.ID,
+		"waiting", "released", "closed by re-release with proof "+proof.Code)
 }

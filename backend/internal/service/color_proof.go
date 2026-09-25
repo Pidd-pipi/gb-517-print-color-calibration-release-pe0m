@@ -13,13 +13,17 @@ import (
 )
 
 type ColorProofService interface {
-	List(context.Context, dto.PageQuery) (repository.Page[model.ColorProof], error)
+	List(context.Context, dto.PageQuery, string) (repository.Page[model.ColorProof], error)
 	Get(context.Context, uint) (model.ColorProof, error)
 	Create(context.Context, dto.CreateColorProof, string, string) (model.ColorProof, error)
 	Update(context.Context, uint, dto.UpdateColorProof, string, string) (model.ColorProof, error)
 	Transition(context.Context, uint, dto.TransitionRequest, string, string, string) (model.ColorProof, error)
 	Delete(context.Context, uint, string, string) error
 	StatusCounts(context.Context) (map[string]int64, error)
+	// LatestAcceptedForRun returns the most recent accepted replacement proof
+	// for a batch created after the given time, plus whether one exists.
+	LatestAcceptedForRun(context.Context, string, time.Time) (model.ColorProof, bool, error)
+	GetByCode(context.Context, string) (model.ColorProof, bool, error)
 }
 
 type colorProofService struct {
@@ -31,8 +35,8 @@ func NewColorProofService(repo repository.ColorProofRepository, security Securit
 	return &colorProofService{repository: repo, security: security}
 }
 
-func (s *colorProofService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.ColorProof], error) {
-	return s.repository.List(ctx, query)
+func (s *colorProofService) List(ctx context.Context, query dto.PageQuery, runCode string) (repository.Page[model.ColorProof], error) {
+	return s.repository.List(ctx, query, runCode)
 }
 
 func (s *colorProofService) Get(ctx context.Context, id uint) (model.ColorProof, error) {
@@ -53,6 +57,7 @@ func (s *colorProofService) Create(ctx context.Context, input dto.CreateColorPro
 		MetricValue: input.MetricValue, MetricUnit: strings.TrimSpace(input.MetricUnit),
 		EffectiveAt: input.EffectiveAt.UTC(), Evidence: strings.TrimSpace(input.Evidence),
 		RelatedCode: strings.ToUpper(strings.TrimSpace(input.RelatedCode)),
+		RunCode:     strings.ToUpper(strings.TrimSpace(input.RunCode)),
 	}
 	if err := s.repository.Create(ctx, &item); err != nil {
 		return model.ColorProof{}, fmt.Errorf("create 色彩校样: %w", err)
@@ -65,6 +70,9 @@ func (s *colorProofService) Update(ctx context.Context, id uint, input dto.Updat
 	current, err := s.repository.Get(ctx, id)
 	if err != nil {
 		return model.ColorProof{}, err
+	}
+	if current.Status == "invalidated" {
+		return model.ColorProof{}, fmt.Errorf("%w: invalidated proofs are kept as rework evidence", ErrProofInvalid)
 	}
 	if err := validateColorProofBusinessFields(current.Code, input.Name, input.Facility, input.Owner); err != nil {
 		return model.ColorProof{}, err
@@ -80,6 +88,7 @@ func (s *colorProofService) Update(ctx context.Context, id uint, input dto.Updat
 	current.EffectiveAt = input.EffectiveAt.UTC()
 	current.Evidence = strings.TrimSpace(input.Evidence)
 	current.RelatedCode = strings.ToUpper(strings.TrimSpace(input.RelatedCode))
+	current.RunCode = strings.ToUpper(strings.TrimSpace(input.RunCode))
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
 	if err := s.repository.Update(ctx, id, input.ExpectedVersion, &current); err != nil {
@@ -93,6 +102,9 @@ func (s *colorProofService) Transition(ctx context.Context, id uint, input dto.T
 	current, err := s.repository.Get(ctx, id)
 	if err != nil {
 		return model.ColorProof{}, err
+	}
+	if current.Status == "invalidated" {
+		return model.ColorProof{}, fmt.Errorf("%w: invalidated proofs can no longer be moved", ErrProofInvalid)
 	}
 	target := strings.TrimSpace(input.Status)
 	if (target == "accepted" || target == "rejected" || current.Status == "accepted" || current.Status == "rejected") && !canReview(role) {
@@ -127,6 +139,14 @@ func (s *colorProofService) Delete(ctx context.Context, id uint, actor, requestI
 
 func (s *colorProofService) StatusCounts(ctx context.Context) (map[string]int64, error) {
 	return s.repository.CountByStatus(ctx)
+}
+
+func (s *colorProofService) LatestAcceptedForRun(ctx context.Context, runCode string, since time.Time) (model.ColorProof, bool, error) {
+	return s.repository.LatestAcceptedForRun(ctx, runCode, since)
+}
+
+func (s *colorProofService) GetByCode(ctx context.Context, code string) (model.ColorProof, bool, error) {
+	return s.repository.GetByCode(ctx, code)
 }
 
 func validateColorProofBusinessFields(code, name, facility, owner string) error {
